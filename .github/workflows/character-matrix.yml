@@ -1,0 +1,106 @@
+name: Windows path character matrix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  characters:
+    name: Character boundary matrix
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Apply the tar workaround used only for this exploration
+        shell: pwsh
+        run: |
+          $patch = Join-Path $PWD 'non-ascii-bootstrap.patch'
+          git -C cinpo apply --check $patch
+          git -C cinpo apply $patch
+
+      - name: Run the character cases
+        shell: pwsh
+        env:
+          CINPO_TEMPLATE_VERSION: 0.5.2
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $root = Join-Path $env:RUNNER_TEMP 'char-matrix'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+          $cases = @(
+            @{ Name = 'hash'; Code = 0x23 },
+            @{ Name = 'exclamation'; Code = 0x21 },
+            @{ Name = 'dollar'; Code = 0x24 },
+            @{ Name = 'percent'; Code = 0x25 },
+            @{ Name = 'ampersand'; Code = 0x26 },
+            @{ Name = 'apostrophe'; Code = 0x27 },
+            @{ Name = 'lparen'; Code = 0x28 },
+            @{ Name = 'rparen'; Code = 0x29 },
+            @{ Name = 'plus'; Code = 0x2B },
+            @{ Name = 'comma'; Code = 0x2C },
+            @{ Name = 'semicolon'; Code = 0x3B },
+            @{ Name = 'equals'; Code = 0x3D },
+            @{ Name = 'at'; Code = 0x40 },
+            @{ Name = 'lbracket'; Code = 0x5B },
+            @{ Name = 'rbracket'; Code = 0x5D },
+            @{ Name = 'caret'; Code = 0x5E },
+            @{ Name = 'backtick'; Code = 0x60 },
+            @{ Name = 'lbrace'; Code = 0x7B },
+            @{ Name = 'rbrace'; Code = 0x7D },
+            @{ Name = 'tilde'; Code = 0x7E }
+          )
+
+          $results = @()
+          foreach ($case in $cases) {
+            $character = [char] $case.Code
+            $destination = Join-Path $root ("case-" + $case.Name + "-" + $character + "\basic")
+            Write-Host "===== $($case.Name) [$character] ====="
+
+            $bootstrapOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+              -File .\cinpo\scripts\bootstrap.ps1 `
+              -Template basic `
+              -Name 'sample-basic' `
+              -Destination $destination 2>&1
+            $bootstrapCode = $LASTEXITCODE
+
+            $helpCode = 'skipped'
+            if ($bootstrapCode -eq 0) {
+              Push-Location $destination
+              try {
+                $helpOutput = & .\gradlew.bat help --console=plain 2>&1
+                $helpCode = $LASTEXITCODE
+                $helpOutput | Select-Object -Last 3 | ForEach-Object { Write-Host $_ }
+              } finally {
+                Pop-Location
+              }
+            } else {
+              $bootstrapOutput | Select-Object -Last 3 | ForEach-Object { Write-Host $_ }
+            }
+
+            Write-Host "RESULT $($case.Name) bootstrap=$bootstrapCode help=$helpCode"
+            $results += [pscustomobject] @{
+              Character = $case.Name
+              Bootstrap = $bootstrapCode
+              Help = $helpCode
+            }
+          }
+
+          Write-Host '===== SUMMARY ====='
+          $results | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+          exit 0
