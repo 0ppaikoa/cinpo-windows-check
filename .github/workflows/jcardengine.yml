@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        template: [basic, probe]
+        template: [basic, probe, authenticated]
     env:
       TEMPLATE: ${{ matrix.template }}
       VENDOR_PASSWORD: ${{ secrets.VENDOR_PASSWORD }}
@@ -55,6 +55,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "bootstrap.ps1 failed: $LASTEXITCODE" }
           New-Item -ItemType Directory -Force -Path (Join-Path $dest 'vendor') | Out-Null
           Copy-Item -Path (Join-Path $PWD 'cinpo-vendor\*') -Destination (Join-Path $dest 'vendor') -Recurse -Force
+          if ($env:TEMPLATE -eq 'authenticated') {
+            $gp = Join-Path $dest 'vendor\globalplatform\org.globalplatform-1.5'
+            New-Item -ItemType Directory -Force -Path (Join-Path $gp 'exports') | Out-Null
+            curl.exe -fsSL -o (Join-Path $gp 'gpapi-globalplatform.jar') `
+              https://mvn.javacard.pro/maven/org/globalplatform/javacard/1.5/javacard-1.5.jar
+            if ($LASTEXITCODE -ne 0) { throw 'GP API download failed' }
+            tar.exe -xf (Join-Path $gp 'gpapi-globalplatform.jar') `
+              -C (Join-Path $gp 'exports') `
+              org/globalplatform/javacard/globalplatform.exp
+            if ($LASTEXITCODE -ne 0) { throw 'GP API extraction failed' }
+          }
           "DEST=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Write the jcardengine profile
@@ -101,7 +112,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        template: [basic, probe]
+        template: [basic, probe, authenticated]
     env:
       TEMPLATE: ${{ matrix.template }}
       VENDOR_PASSWORD: ${{ secrets.VENDOR_PASSWORD }}
@@ -135,6 +146,15 @@ jobs:
             "$dest"
           mkdir -p "$dest/vendor"
           cp -a cinpo-vendor/. "$dest/vendor/"
+          if [ "$TEMPLATE" = authenticated ]; then
+            gp="$dest/vendor/globalplatform/org.globalplatform-1.5"
+            mkdir -p "$gp/exports"
+            curl -fsSL -o "$gp/gpapi-globalplatform.jar" \
+              https://mvn.javacard.pro/maven/org/globalplatform/javacard/1.5/javacard-1.5.jar
+            unzip -o -q "$gp/gpapi-globalplatform.jar" \
+              'org/globalplatform/javacard/globalplatform.exp' \
+              -d "$gp/exports"
+          fi
           cat > "$dest/profile/jcardengine.yaml" <<'EOF'
           schema: cinpo.profile.v1
           name: jcardengine
