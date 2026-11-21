@@ -1,0 +1,161 @@
+name: Windows path exploration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  paths:
+    name: Path boundary matrix
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      VENDOR_PASSWORD: ${{ secrets.VENDOR_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Apply the tar workaround used only for this exploration
+        shell: pwsh
+        run: |
+          $patch = Join-Path $PWD 'non-ascii-bootstrap.patch'
+          git -C cinpo apply --check $patch
+          git -C cinpo apply $patch
+
+      - name: Download and extract the vendor archives
+        shell: pwsh
+        run: |
+          curl.exe -fsSL -o vendor.zip https://raw.githubusercontent.com/AokiApp/cinpo/v0.5.2/vendor.zip
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip download failed' }
+          New-Item -ItemType Directory -Force -Path cinpo-vendor | Out-Null
+          & 'C:\Program Files\7-Zip\7z.exe' x -y "-p$env:VENDOR_PASSWORD" vendor.zip "-o$PWD\cinpo-vendor"
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip extraction failed' }
+
+      - name: Run the path cases
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $root = Join-Path $env:RUNNER_TEMP 'path-exploration'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+          function Stage-Vendor([string] $destination) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $destination 'vendor') | Out-Null
+            Copy-Item -Path (Join-Path $PWD 'cinpo-vendor\*') `
+              -Destination (Join-Path $destination 'vendor') -Recurse -Force
+          }
+
+          function Bootstrap([string] $destination) {
+            $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+              -File .\cinpo\scripts\bootstrap.ps1 `
+              -Template basic `
+              -Name 'sample-basic' `
+              -Destination $destination 2>&1
+            $code = $LASTEXITCODE
+            $output | Select-Object -Last 8 | ForEach-Object { Write-Host $_ }
+            return $code
+          }
+
+          function Build([string] $name, [string] $workingDirectory) {
+            Push-Location $workingDirectory
+            try {
+              $output = & .\gradlew.bat test --console=plain 2>&1
+              $code = $LASTEXITCODE
+              $output | Select-Object -Last 12 | ForEach-Object { Write-Host $_ }
+              Write-Host "RESULT $name build-exit=$code"
+            } finally {
+              Pop-Location
+            }
+          }
+
+          Write-Host '===== case: ascii control ====='
+          $destination = Join-Path $root 'ascii-control\basic'
+          $code = Bootstrap $destination
+          if ($code -ne 0) {
+            Write-Host "RESULT ascii-control bootstrap-exit=$code"
+          } else {
+            Stage-Vendor $destination
+            Build 'ascii-control' $destination
+          }
+
+          Write-Host '===== case: ascii shell characters ====='
+          $destination = Join-Path $root 'ascii [brackets] (paren) & amp\basic'
+          $code = Bootstrap $destination
+          if ($code -ne 0) {
+            Write-Host "RESULT ascii-shell bootstrap-exit=$code"
+          } else {
+            Stage-Vendor $destination
+            Build 'ascii-shell' $destination
+          }
+
+          Write-Host '===== case: ascii percent ====='
+          $destination = Join-Path $root 'ascii %TEMP% literal\basic'
+          $code = Bootstrap $destination
+          if ($code -ne 0) {
+            Write-Host "RESULT ascii-percent bootstrap-exit=$code"
+          } else {
+            Stage-Vendor $destination
+            Build 'ascii-percent' $destination
+          }
+
+          Write-Host '===== case: long ascii ====='
+          $destination = Join-Path $root 'long'
+          for ($index = 0; $index -lt 7; $index++) {
+            $destination = Join-Path $destination ('segment-' + ('x' * 20))
+          }
+          $destination = Join-Path $destination 'basic'
+          Write-Host "length=$($destination.Length)"
+          $code = Bootstrap $destination
+          if ($code -ne 0) {
+            Write-Host "RESULT long-ascii bootstrap-exit=$code"
+          } else {
+            Stage-Vendor $destination
+            Build 'long-ascii' $destination
+          }
+
+          Write-Host '===== case: japanese with subst ====='
+          $destination = Join-Path $root '日本語 subst\basic'
+          $code = Bootstrap $destination
+          if ($code -ne 0) {
+            Write-Host "RESULT japanese-subst bootstrap-exit=$code"
+          } else {
+            Stage-Vendor $destination
+            & subst.exe P: $destination
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host 'RESULT japanese-subst subst-exit=1'
+            } else {
+              Build 'japanese-subst' 'P:\'
+              & subst.exe P: /D
+            }
+          }
+
+          Write-Host '===== case: japanese with junction ====='
+          $destination = Join-Path $root '日本語 junction\basic'
+          $code = Bootstrap $destination
+          if ($code -ne 0) {
+            Write-Host "RESULT japanese-junction bootstrap-exit=$code"
+          } else {
+            Stage-Vendor $destination
+            $link = Join-Path $root 'japanese-junction-link'
+            try {
+              New-Item -ItemType Junction -Path $link -Target $destination | Out-Null
+              Build 'japanese-junction' $link
+            } catch {
+              Write-Host "RESULT japanese-junction junction-error=$($_.Exception.Message)"
+            }
+          }
+
+          exit 0
