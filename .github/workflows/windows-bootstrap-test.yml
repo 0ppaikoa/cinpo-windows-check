@@ -1,0 +1,157 @@
+name: Windows bootstrap verification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: ${{ matrix.template }} on Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        template: [basic, authenticated, probe]
+    env:
+      TEMPLATE: ${{ matrix.template }}
+    steps:
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Run bootstrap.ps1 into an ASCII destination
+        shell: pwsh
+        env:
+          CINPO_TEMPLATE_VERSION: 0.5.2
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP "cinpo test\ascii\$env:TEMPLATE project"
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File .\cinpo\scripts\bootstrap.ps1 `
+            -Template $env:TEMPLATE `
+            -Name "sample-$env:TEMPLATE" `
+            -Destination $dest
+          if ($LASTEXITCODE -ne 0) {
+            throw "bootstrap.ps1 failed with exit code $LASTEXITCODE"
+          }
+          $dest | Out-File -FilePath (Join-Path $env:RUNNER_TEMP 'ascii-dest.txt') -Encoding utf8
+
+      - name: Verify ASCII extraction
+        shell: pwsh
+        run: |
+          $dest = (Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'ascii-dest.txt') -Raw).Trim()
+          $archive = Join-Path $env:RUNNER_TEMP "$env:TEMPLATE-template.tar.gz"
+          & curl.exe -fsSL -o $archive "https://AokiApp.github.io/cinpo/templates/0.5.2/$env:TEMPLATE/template.tar.gz"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'failed to download the reference archive'
+          }
+
+          $required = @(
+            '.gitignore',
+            'AGENTS.md',
+            'README.md',
+            'build.gradle',
+            'settings.gradle',
+            'manifest.yaml',
+            'gradlew',
+            'gradlew.bat',
+            'gradle/libs.versions.toml',
+            'gradle/wrapper/gradle-wrapper.jar',
+            'gradle/wrapper/gradle-wrapper.properties'
+          )
+          foreach ($relative in $required) {
+            $path = Join-Path $dest $relative
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "missing $relative"
+            }
+          }
+
+          $archiveEntries = @(& tar.exe -tzf $archive) |
+            ForEach-Object { $_.TrimEnd('/') } |
+            Where-Object { $_ -and $_ -ne '.' } |
+            Sort-Object
+          if ($LASTEXITCODE -ne 0) {
+            throw "tar -tzf failed for $archive"
+          }
+          $extractedFiles = @(Get-ChildItem -LiteralPath $dest -Recurse -Force -File) |
+            ForEach-Object { [IO.Path]::GetRelativePath($dest, $_.FullName).Replace('\', '/') } |
+            Sort-Object
+          $difference = Compare-Object -ReferenceObject $archiveEntries -DifferenceObject $extractedFiles
+          if ($difference) {
+            throw "extracted files differ from archive: $($difference | Out-String)"
+          }
+
+          $settingsPath = Join-Path $dest 'settings.gradle'
+          $bytes = [IO.File]::ReadAllBytes($settingsPath)
+          if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            throw 'settings.gradle starts with a UTF-8 BOM'
+          }
+          if ([Array]::IndexOf($bytes, [byte] 13) -ge 0) {
+            throw 'settings.gradle contains CR bytes'
+          }
+          $settings = [Text.Encoding]::UTF8.GetString($bytes)
+          $expectedName = "rootProject.name = 'sample-$env:TEMPLATE'"
+          if (-not $settings.Contains($expectedName)) {
+            throw "settings.gradle does not contain $expectedName"
+          }
+
+          $mode = (@(& git -C $dest ls-files -s -- gradlew)) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $mode -notmatch '^100755 ') {
+            throw "gradlew index mode is not 100755: $mode"
+          }
+          $status = (@(& git -C $dest status --porcelain)) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $status) {
+            throw "git status is not clean: $status"
+          }
+          $subject = (@(& git -C $dest log -1 --format=%s)) -join ''
+          if ($subject -ne 'Initial commit') {
+            throw "unexpected initial commit subject: $subject"
+          }
+
+          Push-Location $dest
+          try {
+            & .\gradlew.bat --version --console=plain
+            if ($LASTEXITCODE -ne 0) {
+              throw "gradlew.bat --version failed with exit code $LASTEXITCODE"
+            }
+            & .\gradlew.bat help --console=plain
+            if ($LASTEXITCODE -ne 0) {
+              throw "gradlew.bat help failed with exit code $LASTEXITCODE"
+            }
+          } finally {
+            Pop-Location
+          }
+
+          Write-Host "verified $env:TEMPLATE at $dest"
+
+      - name: Reproduce the non-ASCII destination failure
+        if: matrix.template == 'basic'
+        shell: pwsh
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP "cinpo test\日本語\$env:TEMPLATE project"
+          $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File .\cinpo\scripts\bootstrap.ps1 `
+            -Template $env:TEMPLATE `
+            -Name "sample-$env:TEMPLATE" `
+            -Destination $dest 2>&1
+          $exitCode = $LASTEXITCODE
+          $text = ($output | Out-String)
+          Write-Host $text
+          if ($exitCode -eq 0) {
+            throw 'bootstrap.ps1 unexpectedly succeeded for a non-ASCII destination'
+          }
+          if ($text -notmatch 'could not chdir') {
+            throw "bootstrap.ps1 failed for an unexpected reason: $text"
+          }
+          Write-Host 'known failure reproduced: tar.exe could not chdir to the non-ASCII path'
