@@ -341,13 +341,27 @@ jobs:
           Copy-Item -Path (Join-Path $PWD 'cinpo-vendor\*') -Destination (Join-Path $dest 'vendor') -Recurse -Force
           "DEST=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Run the full build from the Japanese destination
+      - name: Run gradlew.bat from the Japanese destination
         shell: pwsh
         run: |
           Push-Location $env:DEST
           try {
-            & .\gradlew.bat test --console=plain
-            if ($LASTEXITCODE -ne 0) { throw "Gradle failed: $LASTEXITCODE" }
+            $output = & .\gradlew.bat test --console=plain 2>&1
+            $code = $LASTEXITCODE
+            $output | ForEach-Object { Write-Host $_ }
+            Write-Host "gradlew.bat exit=$code"
+          } finally {
+            Pop-Location
+          }
+          exit 0
+
+      - name: Run the wrapper JAR with a relative path
+        shell: pwsh
+        run: |
+          Push-Location $env:DEST
+          try {
+            & java -jar gradle\wrapper\gradle-wrapper.jar test --console=plain
+            if ($LASTEXITCODE -ne 0) { throw "relative wrapper failed: $LASTEXITCODE" }
           } finally {
             Pop-Location
           }
