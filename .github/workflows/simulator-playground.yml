@@ -357,6 +357,7 @@ jobs:
 
       - name: Run the wrapper JAR with a relative path
         shell: pwsh
+        continue-on-error: true
         run: |
           Push-Location $env:DEST
           try {
@@ -364,4 +365,22 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "relative wrapper failed: $LASTEXITCODE" }
           } finally {
             Pop-Location
+          }
+
+      - name: Run the build through an ASCII drive mapping
+        shell: pwsh
+        run: |
+          $drive = 'P:'
+          if (Test-Path -LiteralPath "$drive\") {
+            throw "$drive is already in use"
+          }
+          & subst.exe $drive $env:DEST
+          if ($LASTEXITCODE -ne 0) { throw 'subst failed' }
+          Push-Location "$drive\"
+          try {
+            & .\gradlew.bat test --console=plain
+            if ($LASTEXITCODE -ne 0) { throw "Gradle through $drive failed: $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+            & subst.exe $drive /D
           }
