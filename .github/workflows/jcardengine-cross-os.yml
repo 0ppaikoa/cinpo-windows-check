@@ -1,0 +1,190 @@
+name: JCardEngine appliance cross-OS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build JCardEngine appliance on Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      VENDOR_PASSWORD: ${{ secrets.VENDOR_PASSWORD }}
+    steps:
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download and extract the vendor archives
+        shell: pwsh
+        run: |
+          curl.exe -fsSL -o vendor.zip https://raw.githubusercontent.com/AokiApp/cinpo/v0.5.2/vendor.zip
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip download failed' }
+          New-Item -ItemType Directory -Force -Path cinpo-vendor | Out-Null
+          & 'C:\Program Files\7-Zip\7z.exe' x -y "-p$env:VENDOR_PASSWORD" vendor.zip "-o$PWD\cinpo-vendor"
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip extraction failed' }
+
+      - name: Bootstrap probe with the JCardEngine profile
+        shell: pwsh
+        env:
+          CINPO_TEMPLATE_VERSION: 0.5.2
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'cinpo-probe-engine'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File .\cinpo\scripts\bootstrap.ps1 `
+            -Template probe `
+            -Name 'sample-probe' `
+            -Destination $dest
+          if ($LASTEXITCODE -ne 0) { throw "bootstrap.ps1 failed: $LASTEXITCODE" }
+          New-Item -ItemType Directory -Force -Path (Join-Path $dest 'vendor') | Out-Null
+          Copy-Item -Path (Join-Path $PWD 'cinpo-vendor\*') -Destination (Join-Path $dest 'vendor') -Recurse -Force
+          $profile = @'
+          schema: cinpo.profile.v1
+          name: jcardengine
+          runtime: jcardengine
+          secureChannel:
+            protocol: scp03
+            isdAid: A000000151000000
+            keyVersionNumber: 16
+            keyIdentifier: 0
+            securityLevel: 1
+            encKey: "1111111111111111111111111111111111111111111111111111111111111111"
+            macKey: "2222222222222222222222222222222222222222222222222222222222222222"
+            dekKey: "3333333333333333333333333333333333333333333333333333333333333333"
+          '@
+          Set-Content -LiteralPath (Join-Path $dest 'profile\jcardengine.yaml') -Value $profile -Encoding utf8
+          Push-Location $dest
+          try {
+            & .\gradlew.bat cinpoJar --console=plain
+            if ($LASTEXITCODE -ne 0) { throw "cinpoJar failed: $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+          "JAR=$dest\build\libs\cinpo-appliance.jar" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jcardengine-windows
+          path: ${{ runner.temp }}/cinpo-probe-engine/build/libs/cinpo-appliance.jar
+          if-no-files-found: error
+
+  build-linux:
+    name: Build JCardEngine appliance on Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VENDOR_PASSWORD: ${{ secrets.VENDOR_PASSWORD }}
+    steps:
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download and extract the vendor archives
+        run: |
+          curl -fsSL -o vendor.zip https://raw.githubusercontent.com/AokiApp/cinpo/v0.5.2/vendor.zip
+          mkdir -p cinpo-vendor
+          unzip -q -P "$VENDOR_PASSWORD" vendor.zip -d cinpo-vendor
+
+      - name: Bootstrap probe with the JCardEngine profile
+        run: |
+          dest="$RUNNER_TEMP/cinpo-probe-engine"
+          ./cinpo/scripts/bootstrap.sh \
+            --template probe \
+            --version 0.5.2 \
+            --name sample-probe \
+            "$dest"
+          mkdir -p "$dest/vendor"
+          cp -a cinpo-vendor/. "$dest/vendor/"
+          cat > "$dest/profile/jcardengine.yaml" <<'EOF'
+          schema: cinpo.profile.v1
+          name: jcardengine
+          runtime: jcardengine
+          secureChannel:
+            protocol: scp03
+            isdAid: A000000151000000
+            keyVersionNumber: 16
+            keyIdentifier: 0
+            securityLevel: 1
+            encKey: "1111111111111111111111111111111111111111111111111111111111111111"
+            macKey: "2222222222222222222222222222222222222222222222222222222222222222"
+            dekKey: "3333333333333333333333333333333333333333333333333333333333333333"
+          EOF
+          cd "$dest"
+          ./gradlew cinpoJar --console=plain
+          echo "JAR=$dest/build/libs/cinpo-appliance.jar" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jcardengine-linux
+          path: ${{ runner.temp }}/cinpo-probe-engine/build/libs/cinpo-appliance.jar
+          if-no-files-found: error
+
+  run-linux:
+    name: Run the Windows JCardEngine JAR on Linux
+    needs: build-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: jcardengine-windows
+          path: appliance
+
+      - name: Run the cross-OS JCardEngine appliance
+        run: |
+          set +e
+          java -jar appliance/cinpo-appliance.jar write --profile jcardengine --task=probe 2>&1 | tee output.log
+          code=${PIPESTATUS[0]}
+          echo "RESULT windows-engine-jar-on-linux exit=$code"
+          exit 0
+
+  run-windows:
+    name: Run the Linux JCardEngine JAR on Windows
+    needs: build-linux
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: jcardengine-linux
+          path: appliance
+
+      - name: Run the cross-OS JCardEngine appliance
+        shell: pwsh
+        run: |
+          $output = & java -jar appliance\cinpo-appliance.jar write --profile jcardengine --task=probe 2>&1
+          $code = $LASTEXITCODE
+          $output | ForEach-Object { Write-Host $_ }
+          Write-Host "RESULT linux-engine-jar-on-windows exit=$code"
+          exit 0
