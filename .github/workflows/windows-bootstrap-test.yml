@@ -158,3 +158,58 @@ jobs:
             throw "bootstrap.ps1 failed for an unexpected reason: $text"
           }
           Write-Host 'known failure reproduced: tar.exe could not chdir to the non-ASCII path'
+
+  diagnose:
+    name: Windows environment diagnostics
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - name: Windows PowerShell 5.1
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\diagnose.ps1 -Label 'Windows PowerShell 5.1'
+
+      - name: PowerShell 7
+        shell: pwsh
+        run: pwsh.exe -NoProfile -ExecutionPolicy Bypass -File .\diagnose.ps1 -Label 'PowerShell 7'
+
+      - name: Bootstrap with a Japanese destination under PowerShell 5.1
+        shell: pwsh
+        continue-on-error: true
+        env:
+          CINPO_TEMPLATE_VERSION: 0.5.2
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'cinpo-日本語-bootstrap-51'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File .\cinpo\scripts\bootstrap.ps1 `
+            -Template basic `
+            -Destination $dest 2>&1
+          Write-Host "exit=$LASTEXITCODE"
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host 'unexpected success'
+          }
+
+      - name: Bootstrap with a Japanese destination under PowerShell 7
+        shell: pwsh
+        continue-on-error: true
+        env:
+          CINPO_TEMPLATE_VERSION: 0.5.2
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'cinpo-日本語-bootstrap-7'
+          & pwsh.exe -NoProfile -ExecutionPolicy Bypass `
+            -File .\cinpo\scripts\bootstrap.ps1 `
+            -Template basic `
+            -Destination $dest 2>&1
+          Write-Host "exit=$LASTEXITCODE"
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host 'unexpected success'
+          }
