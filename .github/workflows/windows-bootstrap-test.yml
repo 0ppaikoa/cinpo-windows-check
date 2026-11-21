@@ -78,13 +78,16 @@ jobs:
           }
 
           $archiveEntries = @(& tar.exe -tzf $archive) |
-            ForEach-Object { $_.TrimEnd('/') } |
-            Where-Object { $_ -and $_ -ne '.' } |
+            Where-Object { $_ -and -not $_.EndsWith('/') } |
             Sort-Object
           if ($LASTEXITCODE -ne 0) {
             throw "tar -tzf failed for $archive"
           }
+          $gitPrefix = (Join-Path $dest '.git') + [IO.Path]::DirectorySeparatorChar
           $extractedFiles = @(Get-ChildItem -LiteralPath $dest -Recurse -Force -File) |
+            Where-Object {
+              -not $_.FullName.StartsWith($gitPrefix, [StringComparison]::OrdinalIgnoreCase)
+            } |
             ForEach-Object { [IO.Path]::GetRelativePath($dest, $_.FullName).Replace('\', '/') } |
             Sort-Object
           $difference = Compare-Object -ReferenceObject $archiveEntries -DifferenceObject $extractedFiles
