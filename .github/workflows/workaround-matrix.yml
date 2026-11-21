@@ -78,7 +78,7 @@ jobs:
 
             $targetCode = 0
             try {
-              New-Item -ItemType Directory -Force -LiteralPath $case.Target | Out-Null
+              [IO.Directory]::CreateDirectory($case.Target) | Out-Null
             } catch {
               $targetCode = 1
               Write-Host "target error: $($_.Exception.Message)"
