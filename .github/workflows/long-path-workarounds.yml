@@ -1,0 +1,152 @@
+name: Windows long path workarounds
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  long-paths:
+    name: Long path workarounds
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      VENDOR_PASSWORD: ${{ secrets.VENDOR_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Apply the tar workaround used only for this exploration
+        shell: pwsh
+        run: |
+          $patch = Join-Path $PWD 'non-ascii-bootstrap.patch'
+          git -C cinpo apply --check $patch
+          git -C cinpo apply $patch
+
+      - name: Download and extract the vendor archives
+        shell: pwsh
+        run: |
+          curl.exe -fsSL -o vendor.zip https://raw.githubusercontent.com/AokiApp/cinpo/v0.5.2/vendor.zip
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip download failed' }
+          New-Item -ItemType Directory -Force -Path cinpo-vendor | Out-Null
+          & 'C:\Program Files\7-Zip\7z.exe' x -y "-p$env:VENDOR_PASSWORD" vendor.zip "-o$PWD\cinpo-vendor"
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip extraction failed' }
+
+      - name: Run the long path cases
+        shell: pwsh
+        env:
+          CINPO_TEMPLATE_VERSION: 0.5.2
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $root = Join-Path $env:RUNNER_TEMP 'long-path-workarounds'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+          function New-LongTarget([string] $name) {
+            $target = Join-Path $root $name
+            for ($index = 0; $index -lt 7; $index++) {
+              $target = Join-Path $target ('segment-' + ('x' * 20))
+            }
+            $target = Join-Path $target 'target'
+            [IO.Directory]::CreateDirectory($target) | Out-Null
+            return $target
+          }
+
+          function Bootstrap([string] $destination) {
+            $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+              -File .\cinpo\scripts\bootstrap.ps1 `
+              -Template basic `
+              -Name 'sample-basic' `
+              -Destination $destination 2>&1
+            $code = $LASTEXITCODE
+            $output | Select-Object -Last 6 | ForEach-Object { Write-Host $_ }
+            return $code
+          }
+
+          function Stage-Vendor([string] $destination) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $destination 'vendor') | Out-Null
+            Copy-Item -Path (Join-Path $PWD 'cinpo-vendor\*') `
+              -Destination (Join-Path $destination 'vendor') -Recurse -Force
+          }
+
+          function Build([string] $name, [string] $workingDirectory) {
+            Push-Location $workingDirectory
+            try {
+              $output = & .\gradlew.bat test --console=plain 2>&1
+              $code = $LASTEXITCODE
+              $output | Select-Object -Last 5 | ForEach-Object { Write-Host $_ }
+              Write-Host "RESULT $name build=$code"
+              return $code
+            } finally {
+              Pop-Location
+            }
+          }
+
+          $results = @()
+
+          Write-Host '===== baseline ====='
+          $target = New-LongTarget 'baseline'
+          Write-Host "length=$($target.Length)"
+          $code = Bootstrap $target
+          Write-Host "RESULT baseline bootstrap=$code"
+          $results += [pscustomobject] @{ Case = 'baseline'; Bootstrap = $code; Build = 'skipped' }
+
+          Write-Host '===== core.longpaths ====='
+          git config --global core.longpaths true
+          $target = New-LongTarget 'core-longpaths'
+          Write-Host "length=$($target.Length)"
+          $code = Bootstrap $target
+          if ($code -eq 0) {
+            Stage-Vendor $target
+            $results += [pscustomobject] @{ Case = 'core.longpaths'; Bootstrap = 0; Build = (Build 'core.longpaths' $target) }
+          } else {
+            Write-Host "RESULT core.longpaths bootstrap=$code"
+            $results += [pscustomobject] @{ Case = 'core.longpaths'; Bootstrap = $code; Build = 'skipped' }
+          }
+
+          Write-Host '===== 8.3 short path ====='
+          $target = New-LongTarget 'short-path'
+          Write-Host "length=$($target.Length)"
+          Add-Type -TypeDefinition @"
+          using System;
+          using System.Text;
+          using System.Runtime.InteropServices;
+          public static class ShortPathHelper {
+              [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+              public static extern uint GetShortPathName(string longPath, StringBuilder shortPath, uint bufferLength);
+          }
+          "@
+          $buffer = New-Object System.Text.StringBuilder 32768
+          $length = [ShortPathHelper]::GetShortPathName($target, $buffer, [uint32] $buffer.Capacity)
+          $short = $buffer.ToString()
+          Write-Host "shortLength=$($short.Length)"
+          Write-Host "short=$short"
+          if ($length -eq 0 -or $short -eq $target) {
+            Write-Host 'RESULT short-path unavailable'
+            $results += [pscustomobject] @{ Case = '8.3'; Bootstrap = 'unavailable'; Build = 'skipped' }
+          } else {
+            $code = Bootstrap $short
+            if ($code -eq 0) {
+              Stage-Vendor $short
+              $results += [pscustomobject] @{ Case = '8.3'; Bootstrap = 0; Build = (Build '8.3' $short) }
+            } else {
+              Write-Host "RESULT 8.3 bootstrap=$code"
+              $results += [pscustomobject] @{ Case = '8.3'; Bootstrap = $code; Build = 'skipped' }
+            }
+          }
+
+          Write-Host '===== SUMMARY ====='
+          $results | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+          exit 0
