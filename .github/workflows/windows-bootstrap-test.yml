@@ -141,6 +141,8 @@ jobs:
       - name: Reproduce the non-ASCII destination failure
         if: matrix.template == 'basic'
         shell: pwsh
+        env:
+          CINPO_TEMPLATE_VERSION: 0.5.2
         run: |
           $dest = Join-Path $env:RUNNER_TEMP "cinpo test\日本語\$env:TEMPLATE project"
           $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
