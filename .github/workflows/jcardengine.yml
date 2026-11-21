@@ -1,0 +1,165 @@
+name: JCardEngine runtime
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows / ${{ matrix.template }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        template: [basic, probe]
+    env:
+      TEMPLATE: ${{ matrix.template }}
+      VENDOR_PASSWORD: ${{ secrets.VENDOR_PASSWORD }}
+    steps:
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download and extract the vendor archives
+        shell: pwsh
+        run: |
+          curl.exe -fsSL -o vendor.zip https://raw.githubusercontent.com/AokiApp/cinpo/v0.5.2/vendor.zip
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip download failed' }
+          New-Item -ItemType Directory -Force -Path cinpo-vendor | Out-Null
+          & 'C:\Program Files\7-Zip\7z.exe' x -y "-p$env:VENDOR_PASSWORD" vendor.zip "-o$PWD\cinpo-vendor"
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip extraction failed' }
+
+      - name: Bootstrap and stage vendor
+        shell: pwsh
+        env:
+          CINPO_TEMPLATE_VERSION: 0.5.2
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP "cinpo-$env:TEMPLATE-engine"
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File .\cinpo\scripts\bootstrap.ps1 `
+            -Template $env:TEMPLATE `
+            -Name "sample-$env:TEMPLATE" `
+            -Destination $dest
+          if ($LASTEXITCODE -ne 0) { throw "bootstrap.ps1 failed: $LASTEXITCODE" }
+          New-Item -ItemType Directory -Force -Path (Join-Path $dest 'vendor') | Out-Null
+          Copy-Item -Path (Join-Path $PWD 'cinpo-vendor\*') -Destination (Join-Path $dest 'vendor') -Recurse -Force
+          "DEST=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Write the jcardengine profile
+        shell: pwsh
+        run: |
+          $profile = @'
+          schema: cinpo.profile.v1
+          name: jcardengine
+          runtime: jcardengine
+          secureChannel:
+            protocol: scp03
+            isdAid: A000000151000000
+            keyVersionNumber: 16
+            keyIdentifier: 0
+            securityLevel: 1
+            encKey: "1111111111111111111111111111111111111111111111111111111111111111"
+            macKey: "2222222222222222222222222222222222222222222222222222222222222222"
+            dekKey: "3333333333333333333333333333333333333333333333333333333333333333"
+          '@
+          Set-Content -LiteralPath (Join-Path $env:DEST 'profile\jcardengine.yaml') -Value $profile -Encoding utf8
+
+      - name: Run with the jcardengine profile
+        shell: pwsh
+        run: |
+          Push-Location $env:DEST
+          try {
+            if ($env:TEMPLATE -eq 'probe') {
+              $output = & .\gradlew.bat cinpoRun --args='--debug --profile=jcardengine --task=probe' --console=plain 2>&1
+            } else {
+              $output = & .\gradlew.bat cinpoRun --args='--debug --profile=jcardengine --test' --console=plain 2>&1
+            }
+            $code = $LASTEXITCODE
+            $output | Select-Object -Last 40 | ForEach-Object { Write-Host $_ }
+            Write-Host "RESULT windows-$env:TEMPLATE exit=$code"
+          } finally {
+            Pop-Location
+          }
+          exit 0
+
+  linux:
+    name: Linux / ${{ matrix.template }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        template: [basic, probe]
+    env:
+      TEMPLATE: ${{ matrix.template }}
+      VENDOR_PASSWORD: ${{ secrets.VENDOR_PASSWORD }}
+    steps:
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download and extract the vendor archives
+        run: |
+          curl -fsSL -o vendor.zip https://raw.githubusercontent.com/AokiApp/cinpo/v0.5.2/vendor.zip
+          mkdir -p cinpo-vendor
+          unzip -q -P "$VENDOR_PASSWORD" vendor.zip -d cinpo-vendor
+
+      - name: Bootstrap and stage vendor
+        run: |
+          dest="$RUNNER_TEMP/cinpo-$TEMPLATE-engine"
+          ./cinpo/scripts/bootstrap.sh \
+            --template "$TEMPLATE" \
+            --version 0.5.2 \
+            --name "sample-$TEMPLATE" \
+            "$dest"
+          mkdir -p "$dest/vendor"
+          cp -a cinpo-vendor/. "$dest/vendor/"
+          cat > "$dest/profile/jcardengine.yaml" <<'EOF'
+          schema: cinpo.profile.v1
+          name: jcardengine
+          runtime: jcardengine
+          secureChannel:
+            protocol: scp03
+            isdAid: A000000151000000
+            keyVersionNumber: 16
+            keyIdentifier: 0
+            securityLevel: 1
+            encKey: "1111111111111111111111111111111111111111111111111111111111111111"
+            macKey: "2222222222222222222222222222222222222222222222222222222222222222"
+            dekKey: "3333333333333333333333333333333333333333333333333333333333333333"
+          EOF
+          echo "DEST=$dest" >> "$GITHUB_ENV"
+
+      - name: Run with the jcardengine profile
+        run: |
+          cd "$DEST"
+          set +e
+          if [ "$TEMPLATE" = probe ]; then
+            ./gradlew cinpoRun --args='--debug --profile=jcardengine --task=probe' --console=plain 2>&1 | tee output.log
+          else
+            ./gradlew cinpoRun --args='--debug --profile=jcardengine --test' --console=plain 2>&1 | tee output.log
+          fi
+          code=${PIPESTATUS[0]}
+          echo "RESULT linux-$TEMPLATE exit=$code"
+          exit 0
