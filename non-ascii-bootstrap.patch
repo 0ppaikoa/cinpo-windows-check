@@ -1,0 +1,23 @@
+--- a/scripts/bootstrap.ps1
++++ b/scripts/bootstrap.ps1
+@@ -267,9 +267,17 @@
+         }
+ 
+         New-Item -ItemType Directory -Force -Path $destinationDir | Out-Null
+-        & tar.exe -xzf $archive -C $destinationDir
+-        if ($LASTEXITCODE -ne 0) {
+-            throw "tar failed to extract $archive"
++        $stagedArchive = Join-Path $destinationDir 'template.tar.gz'
++        Copy-Item -LiteralPath $archive -Destination $stagedArchive -Force
++        Push-Location $destinationDir
++        try {
++            & tar.exe -xzf 'template.tar.gz'
++            if ($LASTEXITCODE -ne 0) {
++                throw "tar failed to extract $stagedArchive"
++            }
++        } finally {
++            Pop-Location
++            Remove-Item -LiteralPath $stagedArchive -Force -ErrorAction SilentlyContinue
+         }
+ 
+         $settingsFile = Join-Path $destinationDir 'settings.gradle'

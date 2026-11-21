@@ -1,0 +1,353 @@
+name: Simulator playground
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-debug:
+    name: Windows debug / ${{ matrix.template }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        template: [basic, authenticated, probe]
+    env:
+      TEMPLATE: ${{ matrix.template }}
+      VENDOR_PASSWORD: ${{ secrets.VENDOR_PASSWORD }}
+    steps:
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download and extract the vendor archives
+        shell: pwsh
+        run: |
+          curl.exe -fsSL -o vendor.zip https://raw.githubusercontent.com/AokiApp/cinpo/v0.5.2/vendor.zip
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip download failed' }
+          New-Item -ItemType Directory -Force -Path cinpo-vendor | Out-Null
+          $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip) { $sevenZip = 'C:\Program Files\7-Zip\7z.exe' }
+          & $sevenZip x -y "-p$env:VENDOR_PASSWORD" vendor.zip "-o$PWD\cinpo-vendor"
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip extraction failed' }
+
+      - name: Bootstrap the template and stage vendor
+        shell: pwsh
+        env:
+          CINPO_TEMPLATE_VERSION: 0.5.2
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP "cinpo-$env:TEMPLATE"
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File .\cinpo\scripts\bootstrap.ps1 `
+            -Template $env:TEMPLATE `
+            -Name "sample-$env:TEMPLATE" `
+            -Destination $dest
+          if ($LASTEXITCODE -ne 0) { throw "bootstrap.ps1 failed: $LASTEXITCODE" }
+
+          New-Item -ItemType Directory -Force -Path (Join-Path $dest 'vendor') | Out-Null
+          Copy-Item -Path (Join-Path $PWD 'cinpo-vendor\*') -Destination (Join-Path $dest 'vendor') -Recurse -Force
+
+          if ($env:TEMPLATE -eq 'authenticated') {
+            $gp = Join-Path $dest 'vendor\globalplatform\org.globalplatform-1.5'
+            New-Item -ItemType Directory -Force -Path (Join-Path $gp 'exports') | Out-Null
+            curl.exe -fsSL -o (Join-Path $gp 'gpapi-globalplatform.jar') `
+              https://mvn.javacard.pro/maven/org/globalplatform/javacard/1.5/javacard-1.5.jar
+            if ($LASTEXITCODE -ne 0) { throw 'GP API download failed' }
+            tar.exe -xf (Join-Path $gp 'gpapi-globalplatform.jar') `
+              -C (Join-Path $gp 'exports') `
+              org/globalplatform/javacard/globalplatform.exp
+            if ($LASTEXITCODE -ne 0) { throw 'GP API extraction failed' }
+          }
+
+          "DEST=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Run cinpoRun with debug logging
+        shell: pwsh
+        run: |
+          Push-Location $env:DEST
+          try {
+            if ($env:TEMPLATE -eq 'probe') {
+              & .\gradlew.bat cinpoRun --args='--debug --task=probe' --console=plain
+            } else {
+              & .\gradlew.bat cinpoRun --args='--debug --test' --console=plain
+            }
+            if ($LASTEXITCODE -ne 0) { throw "cinpoRun failed: $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Stop any leftover simulator
+        shell: pwsh
+        run: Get-Process jcsw -ErrorAction SilentlyContinue | Stop-Process -Force
+
+      - name: Build the appliance JAR
+        shell: pwsh
+        run: |
+          Push-Location $env:DEST
+          try {
+            & .\gradlew.bat cinpoJar --console=plain
+            if ($LASTEXITCODE -ne 0) { throw "cinpoJar failed: $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Run the appliance JAR
+        shell: pwsh
+        run: |
+          Push-Location $env:DEST
+          try {
+            if ($env:TEMPLATE -eq 'probe') {
+              & java -jar build\libs\cinpo-appliance.jar write --profile jcdksim --task=probe
+            } else {
+              & java -jar build\libs\cinpo-appliance.jar write --profile jcdksim --test
+            }
+            if ($LASTEXITCODE -ne 0) { throw "appliance failed: $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Try --skip-install after the run
+        if: matrix.template == 'basic'
+        shell: pwsh
+        run: |
+          Push-Location $env:DEST
+          try {
+            & .\gradlew.bat cinpoRun --args='--skip-install --test' --console=plain 2>&1 |
+              Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'skip-install.log')
+            Write-Host "skip-install exit=$LASTEXITCODE"
+          } finally {
+            Pop-Location
+          }
+          exit 0
+
+  linux-debug:
+    name: Linux debug / ${{ matrix.template }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        template: [basic, authenticated, probe]
+    env:
+      TEMPLATE: ${{ matrix.template }}
+      VENDOR_PASSWORD: ${{ secrets.VENDOR_PASSWORD }}
+    steps:
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download and extract the vendor archives
+        run: |
+          curl -fsSL -o vendor.zip https://raw.githubusercontent.com/AokiApp/cinpo/v0.5.2/vendor.zip
+          mkdir -p cinpo-vendor
+          unzip -q -P "$VENDOR_PASSWORD" vendor.zip -d cinpo-vendor
+
+      - name: Bootstrap the template and stage vendor
+        run: |
+          dest="$RUNNER_TEMP/cinpo-$TEMPLATE"
+          ./cinpo/scripts/bootstrap.sh \
+            --template "$TEMPLATE" \
+            --version 0.5.2 \
+            --name "sample-$TEMPLATE" \
+            "$dest"
+          mkdir -p "$dest/vendor"
+          cp -a cinpo-vendor/. "$dest/vendor/"
+          if [ "$TEMPLATE" = authenticated ]; then
+            gp="$dest/vendor/globalplatform/org.globalplatform-1.5"
+            mkdir -p "$gp/exports"
+            curl -fsSL -o "$gp/gpapi-globalplatform.jar" \
+              https://mvn.javacard.pro/maven/org/globalplatform/javacard/1.5/javacard-1.5.jar
+            unzip -o -q "$gp/gpapi-globalplatform.jar" \
+              'org/globalplatform/javacard/globalplatform.exp' \
+              -d "$gp/exports"
+          fi
+          echo "DEST=$dest" >> "$GITHUB_ENV"
+
+      - name: Run cinpoRun with debug logging
+        run: |
+          cd "$DEST"
+          if [ "$TEMPLATE" = probe ]; then
+            ./gradlew cinpoRun --args='--debug --task=probe' --console=plain
+          else
+            ./gradlew cinpoRun --args='--debug --test' --console=plain
+          fi
+
+      - name: Stop any leftover simulator
+        run: pkill -x jcsl || true
+
+      - name: Build the appliance JAR
+        run: |
+          cd "$DEST"
+          ./gradlew cinpoJar --console=plain
+
+      - name: Run the appliance JAR
+        run: |
+          cd "$DEST"
+          if [ "$TEMPLATE" = probe ]; then
+            java -jar build/libs/cinpo-appliance.jar write --profile jcdksim --task=probe
+          else
+            java -jar build/libs/cinpo-appliance.jar write --profile jcdksim --test
+          fi
+
+      - name: Try --skip-install after the run
+        if: matrix.template == 'basic'
+        run: |
+          cd "$DEST"
+          ./gradlew cinpoRun --args='--skip-install --test' --console=plain 2>&1 | tee "$RUNNER_TEMP/skip-install.log" || true
+
+  windows-failures:
+    name: Windows failure modes
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      VENDOR_PASSWORD: ${{ secrets.VENDOR_PASSWORD }}
+    steps:
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download and extract the vendor archives
+        shell: pwsh
+        run: |
+          curl.exe -fsSL -o vendor.zip https://raw.githubusercontent.com/AokiApp/cinpo/v0.5.2/vendor.zip
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip download failed' }
+          New-Item -ItemType Directory -Force -Path cinpo-vendor | Out-Null
+          & 'C:\Program Files\7-Zip\7z.exe' x -y "-p$env:VENDOR_PASSWORD" vendor.zip "-o$PWD\cinpo-vendor"
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip extraction failed' }
+
+      - name: Bootstrap the probe template and stage vendor
+        shell: pwsh
+        env:
+          CINPO_TEMPLATE_VERSION: 0.5.2
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'cinpo-probe-failures'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File .\cinpo\scripts\bootstrap.ps1 `
+            -Template probe `
+            -Name 'sample-probe' `
+            -Destination $dest
+          if ($LASTEXITCODE -ne 0) { throw "bootstrap.ps1 failed: $LASTEXITCODE" }
+          New-Item -ItemType Directory -Force -Path (Join-Path $dest 'vendor') | Out-Null
+          Copy-Item -Path (Join-Path $PWD 'cinpo-vendor\*') -Destination (Join-Path $dest 'vendor') -Recurse -Force
+          "DEST=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Check clean failures
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $cases = @(
+            @{ Name = 'unknown task'; Args = '--task=does-not-exist' },
+            @{ Name = 'unknown profile'; Args = '--profile=does-not-exist' },
+            @{ Name = 'invalid AID'; Args = '--task=probe -- --aid=ZZ' }
+          )
+          Push-Location $env:DEST
+          try {
+            foreach ($case in $cases) {
+              Write-Host "===== $($case.Name) ====="
+              $output = & .\gradlew.bat cinpoRun "--args=$($case.Args)" --console=plain 2>&1
+              $code = $LASTEXITCODE
+              $output | ForEach-Object { Write-Host $_ }
+              Write-Host "exit=$code"
+              if ($code -eq 0) {
+                throw "$($case.Name) unexpectedly succeeded"
+              }
+            }
+          } finally {
+            Pop-Location
+          }
+          exit 0
+
+  windows-non-ascii-fix:
+    name: Windows non-ASCII destination with fix
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      VENDOR_PASSWORD: ${{ secrets.VENDOR_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Apply the non-ASCII bootstrap fix
+        shell: pwsh
+        run: |
+          $patch = Join-Path $PWD 'non-ascii-bootstrap.patch'
+          git -C cinpo apply --check $patch
+          git -C cinpo apply $patch
+
+      - name: Download and extract the vendor archives
+        shell: pwsh
+        run: |
+          curl.exe -fsSL -o vendor.zip https://raw.githubusercontent.com/AokiApp/cinpo/v0.5.2/vendor.zip
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip download failed' }
+          New-Item -ItemType Directory -Force -Path cinpo-vendor | Out-Null
+          & 'C:\Program Files\7-Zip\7z.exe' x -y "-p$env:VENDOR_PASSWORD" vendor.zip "-o$PWD\cinpo-vendor"
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip extraction failed' }
+
+      - name: Bootstrap into a Japanese destination
+        shell: pwsh
+        env:
+          CINPO_TEMPLATE_VERSION: 0.5.2
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'cinpo-日本語-fixed'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File .\cinpo\scripts\bootstrap.ps1 `
+            -Template basic `
+            -Name 'sample-basic' `
+            -Destination $dest
+          if ($LASTEXITCODE -ne 0) { throw "patched bootstrap.ps1 failed: $LASTEXITCODE" }
+          New-Item -ItemType Directory -Force -Path (Join-Path $dest 'vendor') | Out-Null
+          Copy-Item -Path (Join-Path $PWD 'cinpo-vendor\*') -Destination (Join-Path $dest 'vendor') -Recurse -Force
+          "DEST=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Run the full build from the Japanese destination
+        shell: pwsh
+        run: |
+          Push-Location $env:DEST
+          try {
+            & .\gradlew.bat test --console=plain
+            if ($LASTEXITCODE -ne 0) { throw "Gradle failed: $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
