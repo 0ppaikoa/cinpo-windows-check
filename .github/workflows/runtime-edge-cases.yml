@@ -1,0 +1,175 @@
+name: Windows runtime edge cases
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pcsc:
+    name: PC/SC without a reader
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      VENDOR_PASSWORD: ${{ secrets.VENDOR_PASSWORD }}
+    steps:
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download and extract the vendor archives
+        shell: pwsh
+        run: |
+          curl.exe -fsSL -o vendor.zip https://raw.githubusercontent.com/AokiApp/cinpo/v0.5.2/vendor.zip
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip download failed' }
+          New-Item -ItemType Directory -Force -Path cinpo-vendor | Out-Null
+          & 'C:\Program Files\7-Zip\7z.exe' x -y "-p$env:VENDOR_PASSWORD" vendor.zip "-o$PWD\cinpo-vendor"
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip extraction failed' }
+
+      - name: Bootstrap the basic template and stage vendor
+        shell: pwsh
+        env:
+          CINPO_TEMPLATE_VERSION: 0.5.2
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'cinpo-pcsc'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File .\cinpo\scripts\bootstrap.ps1 `
+            -Template basic `
+            -Name 'sample-basic' `
+            -Destination $dest
+          if ($LASTEXITCODE -ne 0) { throw "bootstrap.ps1 failed: $LASTEXITCODE" }
+          New-Item -ItemType Directory -Force -Path (Join-Path $dest 'vendor') | Out-Null
+          Copy-Item -Path (Join-Path $PWD 'cinpo-vendor\*') -Destination (Join-Path $dest 'vendor') -Recurse -Force
+          "DEST=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Write a PC/SC profile
+        shell: pwsh
+        run: |
+          $profile = @'
+          schema: cinpo.profile.v1
+          name: pcsc
+          runtime: pcsc
+          secureChannel:
+            protocol: scp03
+            isdAid: A000000151000000
+            keyVersionNumber: 16
+            keyIdentifier: 0
+            securityLevel: 1
+            encKey: "1111111111111111111111111111111111111111111111111111111111111111"
+            macKey: "2222222222222222222222222222222222222222222222222222222222222222"
+            dekKey: "3333333333333333333333333333333333333333333333333333333333333333"
+          '@
+          Set-Content -LiteralPath (Join-Path $env:DEST 'profile\pcsc.yaml') -Value $profile -Encoding utf8
+
+      - name: Report the PC/SC environment
+        shell: pwsh
+        run: |
+          Get-Service SCardSvr -ErrorAction SilentlyContinue |
+            Select-Object Name, Status |
+            Format-Table -AutoSize |
+            Out-String |
+            ForEach-Object { Write-Host $_ }
+          Get-PnpDevice -Class SmartCardReader -ErrorAction SilentlyContinue |
+            Select-Object Status, FriendlyName |
+            Format-Table -AutoSize |
+            Out-String |
+            ForEach-Object { Write-Host $_ }
+
+      - name: Run with the PC/SC profile
+        shell: pwsh
+        run: |
+          Push-Location $env:DEST
+          try {
+            $output = & .\gradlew.bat cinpoRun --args='--profile=pcsc --test' --console=plain 2>&1
+            $code = $LASTEXITCODE
+            $output | Select-Object -Last 30 | ForEach-Object { Write-Host $_ }
+            Write-Host "RESULT pcsc exit=$code"
+          } finally {
+            Pop-Location
+          }
+          exit 0
+
+  lifecycle:
+    name: Simulator lifecycle
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      VENDOR_PASSWORD: ${{ secrets.VENDOR_PASSWORD }}
+    steps:
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download and extract the vendor archives
+        shell: pwsh
+        run: |
+          curl.exe -fsSL -o vendor.zip https://raw.githubusercontent.com/AokiApp/cinpo/v0.5.2/vendor.zip
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip download failed' }
+          New-Item -ItemType Directory -Force -Path cinpo-vendor | Out-Null
+          & 'C:\Program Files\7-Zip\7z.exe' x -y "-p$env:VENDOR_PASSWORD" vendor.zip "-o$PWD\cinpo-vendor"
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip extraction failed' }
+
+      - name: Bootstrap the basic template and stage vendor
+        shell: pwsh
+        env:
+          CINPO_TEMPLATE_VERSION: 0.5.2
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'cinpo-lifecycle'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File .\cinpo\scripts\bootstrap.ps1 `
+            -Template basic `
+            -Name 'sample-basic' `
+            -Destination $dest
+          if ($LASTEXITCODE -ne 0) { throw "bootstrap.ps1 failed: $LASTEXITCODE" }
+          New-Item -ItemType Directory -Force -Path (Join-Path $dest 'vendor') | Out-Null
+          Copy-Item -Path (Join-Path $PWD 'cinpo-vendor\*') -Destination (Join-Path $dest 'vendor') -Recurse -Force
+          "DEST=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Run once and check the simulator process
+        shell: pwsh
+        run: |
+          Push-Location $env:DEST
+          try {
+            & .\gradlew.bat cinpoRun --args='--test' --console=plain
+            Write-Host "RESULT first-run exit=$LASTEXITCODE"
+          } finally {
+            Pop-Location
+          }
+          $processes = @(Get-Process jcsw -ErrorAction SilentlyContinue)
+          Write-Host "RESULT jcsw-after-first=$($processes.Count)"
+          $processes | Select-Object Id, ProcessName | Format-Table -AutoSize | Out-String | Write-Host
+
+      - name: Run again with --skip-install
+        shell: pwsh
+        run: |
+          Push-Location $env:DEST
+          try {
+            $output = & .\gradlew.bat cinpoRun --args='--skip-install --test' --console=plain 2>&1
+            $code = $LASTEXITCODE
+            $output | Select-Object -Last 20 | ForEach-Object { Write-Host $_ }
+            Write-Host "RESULT skip-install exit=$code"
+          } finally {
+            Pop-Location
+          }
+          $processes = @(Get-Process jcsw -ErrorAction SilentlyContinue)
+          Write-Host "RESULT jcsw-after-skip-install=$($processes.Count)"
+          exit 0
