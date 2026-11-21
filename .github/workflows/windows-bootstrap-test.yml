@@ -160,6 +160,7 @@ jobs:
             throw "bootstrap.ps1 failed for an unexpected reason: $text"
           }
           Write-Host 'known failure reproduced: tar.exe could not chdir to the non-ASCII path'
+          exit 0
 
   diagnose:
     name: Windows environment diagnostics

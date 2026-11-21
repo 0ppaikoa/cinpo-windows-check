@@ -2,7 +2,7 @@ param(
     [string] $Label = 'unknown'
 )
 
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 
 Write-Host "===== $Label ====="
 Write-Host "PSVersion: $($PSVersionTable.PSVersion)"
