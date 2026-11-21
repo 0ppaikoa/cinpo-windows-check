@@ -55,13 +55,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path $root | Out-Null
 
           function New-LongTarget([string] $name) {
-            $target = Join-Path $root $name
+            $parent = Join-Path $root $name
             for ($index = 0; $index -lt 7; $index++) {
-              $target = Join-Path $target ('segment-' + ('x' * 20))
+              $parent = Join-Path $parent ('segment-' + ('x' * 20))
             }
-            $target = Join-Path $target 'target'
-            [IO.Directory]::CreateDirectory($target) | Out-Null
-            return $target
+            [IO.Directory]::CreateDirectory($parent) | Out-Null
+            return [pscustomobject] @{
+              Parent = $parent
+              Target = (Join-Path $parent 'target')
+            }
           }
 
           function Bootstrap([string] $destination) {
@@ -97,7 +99,8 @@ jobs:
           $results = @()
 
           Write-Host '===== baseline ====='
-          $target = New-LongTarget 'baseline'
+          $case = New-LongTarget 'baseline'
+          $target = $case.Target
           Write-Host "length=$($target.Length)"
           $code = Bootstrap $target
           Write-Host "RESULT baseline bootstrap=$code"
@@ -105,7 +108,8 @@ jobs:
 
           Write-Host '===== core.longpaths ====='
           git config --global core.longpaths true
-          $target = New-LongTarget 'core-longpaths'
+          $case = New-LongTarget 'core-longpaths'
+          $target = $case.Target
           Write-Host "length=$($target.Length)"
           $code = Bootstrap $target
           if ($code -eq 0) {
@@ -117,7 +121,8 @@ jobs:
           }
 
           Write-Host '===== 8.3 short path ====='
-          $target = New-LongTarget 'short-path'
+          $case = New-LongTarget 'short-path'
+          $target = $case.Target
           Write-Host "length=$($target.Length)"
           Add-Type -TypeDefinition @"
           using System;
@@ -129,11 +134,12 @@ jobs:
           }
           "@
           $buffer = New-Object System.Text.StringBuilder 32768
-          $length = [ShortPathHelper]::GetShortPathName($target, $buffer, [uint32] $buffer.Capacity)
-          $short = $buffer.ToString()
+          $length = [ShortPathHelper]::GetShortPathName($case.Parent, $buffer, [uint32] $buffer.Capacity)
+          $shortParent = $buffer.ToString()
+          $short = Join-Path $shortParent 'target'
           Write-Host "shortLength=$($short.Length)"
           Write-Host "short=$short"
-          if ($length -eq 0 -or $short -eq $target) {
+          if ($length -eq 0 -or $shortParent -eq $case.Parent) {
             Write-Host 'RESULT short-path unavailable'
             $results += [pscustomobject] @{ Case = '8.3'; Bootstrap = 'unavailable'; Build = 'skipped' }
           } else {
