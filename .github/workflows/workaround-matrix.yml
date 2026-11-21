@@ -1,0 +1,135 @@
+name: Windows path workaround matrix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  workarounds:
+    name: ASCII drive mapping across path boundaries
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      VENDOR_PASSWORD: ${{ secrets.VENDOR_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check out CINPO v0.5.2
+        uses: actions/checkout@v6
+        with:
+          repository: AokiApp/cinpo
+          ref: v0.5.2
+          path: cinpo
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Apply the tar workaround used only for this exploration
+        shell: pwsh
+        run: |
+          $patch = Join-Path $PWD 'non-ascii-bootstrap.patch'
+          git -C cinpo apply --check $patch
+          git -C cinpo apply $patch
+
+      - name: Download and extract the vendor archives
+        shell: pwsh
+        run: |
+          curl.exe -fsSL -o vendor.zip https://raw.githubusercontent.com/AokiApp/cinpo/v0.5.2/vendor.zip
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip download failed' }
+          New-Item -ItemType Directory -Force -Path cinpo-vendor | Out-Null
+          & 'C:\Program Files\7-Zip\7z.exe' x -y "-p$env:VENDOR_PASSWORD" vendor.zip "-o$PWD\cinpo-vendor"
+          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip extraction failed' }
+
+      - name: Run the workaround cases
+        shell: pwsh
+        env:
+          CINPO_TEMPLATE_VERSION: 0.5.2
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $root = Join-Path $env:RUNNER_TEMP 'workaround-matrix'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+          $longTarget = Join-Path $root 'long'
+          for ($index = 0; $index -lt 7; $index++) {
+            $longTarget = Join-Path $longTarget ('segment-' + ('x' * 20))
+          }
+          $longTarget = Join-Path $longTarget 'target'
+
+          $cases = @(
+            @{ Name = 'control'; Target = (Join-Path $root 'case-control\target') },
+            @{ Name = 'lbracket'; Target = (Join-Path $root 'case-lbracket-[\target') },
+            @{ Name = 'ampersand'; Target = (Join-Path $root 'case-ampersand-&\target') },
+            @{ Name = 'semicolon'; Target = (Join-Path $root 'case-semicolon-;\target') },
+            @{ Name = 'caret'; Target = (Join-Path $root 'case-caret-^\target') },
+            @{ Name = 'percent-temp'; Target = (Join-Path $root 'case-percent-%TEMP%\target') },
+            @{ Name = 'long'; Target = $longTarget },
+            @{ Name = 'japanese'; Target = (Join-Path $root 'case-日本語\target') }
+          )
+
+          $results = @()
+          foreach ($case in $cases) {
+            Write-Host "===== $($case.Name) ====="
+            Write-Host "target=$($case.Target) length=$($case.Target.Length)"
+
+            $targetCode = 0
+            try {
+              New-Item -ItemType Directory -Force -LiteralPath $case.Target | Out-Null
+            } catch {
+              $targetCode = 1
+              Write-Host "target error: $($_.Exception.Message)"
+            }
+
+            $substCode = 1
+            $bootstrapCode = 'skipped'
+            $buildCode = 'skipped'
+
+            if ($targetCode -eq 0) {
+              & subst.exe P: $case.Target
+              $substCode = $LASTEXITCODE
+              if ($substCode -eq 0) {
+                $project = 'P:\project'
+                $bootstrapOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+                  -File .\cinpo\scripts\bootstrap.ps1 `
+                  -Template basic `
+                  -Name 'sample-basic' `
+                  -Destination $project 2>&1
+                $bootstrapCode = $LASTEXITCODE
+                if ($bootstrapCode -eq 0) {
+                  New-Item -ItemType Directory -Force -Path (Join-Path $project 'vendor') | Out-Null
+                  Copy-Item -Path (Join-Path $PWD 'cinpo-vendor\*') `
+                    -Destination (Join-Path $project 'vendor') -Recurse -Force
+                  Push-Location $project
+                  try {
+                    $buildOutput = & .\gradlew.bat test --console=plain 2>&1
+                    $buildCode = $LASTEXITCODE
+                    $buildOutput | Select-Object -Last 6 | ForEach-Object { Write-Host $_ }
+                  } finally {
+                    Pop-Location
+                  }
+                } else {
+                  $bootstrapOutput | Select-Object -Last 4 | ForEach-Object { Write-Host $_ }
+                }
+                & subst.exe P: /D
+              } else {
+                Write-Host 'subst error'
+              }
+            }
+
+            Write-Host "RESULT $($case.Name) target=$targetCode subst=$substCode bootstrap=$bootstrapCode build=$buildCode"
+            $results += [pscustomobject] @{
+              Case = $case.Name
+              Target = $targetCode
+              Subst = $substCode
+              Bootstrap = $bootstrapCode
+              Build = $buildCode
+            }
+          }
+
+          Write-Host '===== SUMMARY ====='
+          $results | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+          exit 0
