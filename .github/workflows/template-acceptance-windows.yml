@@ -329,3 +329,6 @@ jobs:
           } finally {
             Pop-Location
           }
+          # The last negative case leaves $LASTEXITCODE at 1 on purpose. Exit
+          # explicitly so the step reports the checks, not that exit code.
+          exit 0
