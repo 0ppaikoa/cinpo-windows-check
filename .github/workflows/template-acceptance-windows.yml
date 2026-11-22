@@ -68,15 +68,14 @@ jobs:
         shell: pwsh
         run: |
           [IO.Directory]::CreateDirectory($env:PROJECT_ROOT) | Out-Null
-          $vendor = Join-Path $env:PROJECT_ROOT 'vendor'
-          [IO.Directory]::CreateDirectory($vendor) | Out-Null
           $zip = Join-Path $env:PROJECT_ROOT 'vendor.zip'
           curl.exe -fsSL -o $zip "https://raw.githubusercontent.com/AokiApp/cinpo/$env:CINPO_REF/vendor.zip"
           if ($LASTEXITCODE -ne 0) { throw 'vendor.zip download failed' }
-          $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
-          if (-not $sevenZip) { $sevenZip = 'C:\Program Files\7-Zip\7z.exe' }
-          & $sevenZip x -y "-p$env:VENDOR_PASSWORD" $zip "-o$vendor"
-          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip extraction failed' }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File .\cinpo\scripts\extract_vendor.ps1 `
+            -Archive $zip `
+            -Destination (Join-Path $env:PROJECT_ROOT 'vendor')
+          if ($LASTEXITCODE -ne 0) { throw "extract_vendor.ps1 failed: $LASTEXITCODE" }
 
       - name: Bootstrap the templates and stage vendor
         shell: pwsh
