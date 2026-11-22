@@ -44,16 +44,10 @@ env:
   PROJECT_ROOT: 'C:\cpa'
 
 jobs:
-  jcdksim:
-    name: jcdksim / ${{ matrix.template }}
+  acceptance:
+    name: Windows template acceptance
     runs-on: windows-2025
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        template: [basic, authenticated, probe]
-    env:
-      TEMPLATE: ${{ matrix.template }}
+    timeout-minutes: 60
     steps:
       # Porting note: inside AokiApp/cinpo this step becomes a plain
       # actions/checkout, and the script path becomes .\scripts\bootstrap.ps1.
@@ -70,7 +64,7 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Download and extract the vendor archives
+      - name: Extract the vendor archives
         shell: pwsh
         run: |
           [IO.Directory]::CreateDirectory($env:PROJECT_ROOT) | Out-Null
@@ -84,224 +78,87 @@ jobs:
           & $sevenZip x -y "-p$env:VENDOR_PASSWORD" $zip "-o$vendor"
           if ($LASTEXITCODE -ne 0) { throw 'vendor.zip extraction failed' }
 
-      - name: Bootstrap the template and stage vendor
+      - name: Bootstrap the templates and stage vendor
         shell: pwsh
         run: |
-          $dest = Join-Path $env:PROJECT_ROOT $env:TEMPLATE
           $version = $env:CINPO_REF -replace '^v', ''
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-            -File .\cinpo\scripts\bootstrap.ps1 `
-            -Template $env:TEMPLATE `
-            -Version $version `
-            -Name "sample-$env:TEMPLATE" `
-            -Destination $dest
-          if ($LASTEXITCODE -ne 0) { throw "bootstrap.ps1 failed: $LASTEXITCODE" }
+          foreach ($template in @('basic', 'authenticated', 'probe')) {
+            $dest = Join-Path $env:PROJECT_ROOT $template
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+              -File .\cinpo\scripts\bootstrap.ps1 `
+              -Template $template `
+              -Version $version `
+              -Name "sample-$template" `
+              -Destination $dest
+            if ($LASTEXITCODE -ne 0) { throw "bootstrap.ps1 failed for $template: $LASTEXITCODE" }
 
-          New-Item -ItemType Directory -Force -Path (Join-Path $dest 'vendor') | Out-Null
-          Copy-Item -Path (Join-Path $env:PROJECT_ROOT 'vendor\*') `
-            -Destination (Join-Path $dest 'vendor') -Recurse -Force
+            New-Item -ItemType Directory -Force -Path (Join-Path $dest 'vendor') | Out-Null
+            Copy-Item -Path (Join-Path $env:PROJECT_ROOT 'vendor\*') `
+              -Destination (Join-Path $dest 'vendor') -Recurse -Force
 
-          if ($env:TEMPLATE -eq 'authenticated') {
-            $gp = Join-Path $dest 'vendor\globalplatform\org.globalplatform-1.5'
-            New-Item -ItemType Directory -Force -Path (Join-Path $gp 'exports') | Out-Null
-            curl.exe -fsSL -o (Join-Path $gp 'gpapi-globalplatform.jar') `
-              https://mvn.javacard.pro/maven/org/globalplatform/javacard/1.5/javacard-1.5.jar
-            if ($LASTEXITCODE -ne 0) { throw 'GP API download failed' }
-            tar.exe -xf (Join-Path $gp 'gpapi-globalplatform.jar') `
-              -C (Join-Path $gp 'exports') `
-              org/globalplatform/javacard/globalplatform.exp
-            if ($LASTEXITCODE -ne 0) { throw 'GP API extraction failed' }
+            if ($template -eq 'authenticated') {
+              $gp = Join-Path $dest 'vendor\globalplatform\org.globalplatform-1.5'
+              New-Item -ItemType Directory -Force -Path (Join-Path $gp 'exports') | Out-Null
+              curl.exe -fsSL -o (Join-Path $gp 'gpapi-globalplatform.jar') `
+                https://mvn.javacard.pro/maven/org/globalplatform/javacard/1.5/javacard-1.5.jar
+              if ($LASTEXITCODE -ne 0) { throw 'GP API download failed' }
+              tar.exe -xf (Join-Path $gp 'gpapi-globalplatform.jar') `
+                -C (Join-Path $gp 'exports') `
+                org/globalplatform/javacard/globalplatform.exp
+              if ($LASTEXITCODE -ne 0) { throw 'GP API extraction failed' }
+            }
           }
 
-          "DEST=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Run the template
+      - name: jcdksim / basic
         shell: pwsh
         run: |
-          Push-Location $env:DEST
+          Push-Location (Join-Path $env:PROJECT_ROOT 'basic')
           try {
-            if ($env:TEMPLATE -eq 'probe') {
-              $output = & .\gradlew.bat build --console=plain 2>&1
-            } else {
-              $output = & .\gradlew.bat test --console=plain 2>&1
-            }
+            & .\gradlew.bat test --console=plain
+            if ($LASTEXITCODE -ne 0) { throw "gradlew failed: $LASTEXITCODE" }
+            Write-Host 'RESULT jcdksim-basic exit=0'
+          } finally {
+            Pop-Location
+          }
+
+      - name: jcdksim / authenticated
+        shell: pwsh
+        run: |
+          Push-Location (Join-Path $env:PROJECT_ROOT 'authenticated')
+          try {
+            & .\gradlew.bat test --console=plain
+            if ($LASTEXITCODE -ne 0) { throw "gradlew failed: $LASTEXITCODE" }
+            Write-Host 'RESULT jcdksim-authenticated exit=0'
+          } finally {
+            Pop-Location
+          }
+
+      - name: jcdksim / probe
+        shell: pwsh
+        run: |
+          Push-Location (Join-Path $env:PROJECT_ROOT 'probe')
+          try {
+            $output = & .\gradlew.bat build --console=plain 2>&1
             $code = $LASTEXITCODE
             $output | ForEach-Object { Write-Host $_ }
             if ($code -ne 0) { throw "gradlew failed: $code" }
-            if ($env:TEMPLATE -eq 'probe') {
-              if (-not ($output | Select-String -Pattern 'Card data: ' -Quiet)) {
-                throw 'probe did not report card data'
-              }
+            if (-not ($output | Select-String -Pattern 'Card data: ' -Quiet)) {
+              throw 'probe did not report card data'
             }
-            Write-Host "RESULT jcdksim-$env:TEMPLATE exit=$code"
+            Write-Host 'RESULT jcdksim-probe exit=0'
           } finally {
             Pop-Location
           }
 
-  jcardengine:
-    # The authenticated template is excluded: GPSystem.getCardContentState()
-    # returns 0x00 under JCardEngine, and provision.HelloProvision expects 0x07.
-    name: JCardEngine / ${{ matrix.template }}
-    runs-on: windows-2025
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        template: [basic, probe]
-    env:
-      TEMPLATE: ${{ matrix.template }}
-    steps:
-      - name: Check out CINPO at the release ref
-        uses: actions/checkout@v6
-        with:
-          repository: AokiApp/cinpo
-          ref: ${{ env.CINPO_REF }}
-          path: cinpo
-          persist-credentials: false
-
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Download and extract the vendor archives
+      - name: Appliance JAR and CLI failures
         shell: pwsh
         run: |
-          [IO.Directory]::CreateDirectory($env:PROJECT_ROOT) | Out-Null
-          $vendor = Join-Path $env:PROJECT_ROOT 'vendor'
-          [IO.Directory]::CreateDirectory($vendor) | Out-Null
-          $zip = Join-Path $env:PROJECT_ROOT 'vendor.zip'
-          curl.exe -fsSL -o $zip "https://raw.githubusercontent.com/AokiApp/cinpo/$env:CINPO_REF/vendor.zip"
-          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip download failed' }
-          $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
-          if (-not $sevenZip) { $sevenZip = 'C:\Program Files\7-Zip\7z.exe' }
-          & $sevenZip x -y "-p$env:VENDOR_PASSWORD" $zip "-o$vendor"
-          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip extraction failed' }
-
-      - name: Bootstrap the template and stage vendor
-        shell: pwsh
-        run: |
-          $dest = Join-Path $env:PROJECT_ROOT "engine-$env:TEMPLATE"
-          $version = $env:CINPO_REF -replace '^v', ''
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-            -File .\cinpo\scripts\bootstrap.ps1 `
-            -Template $env:TEMPLATE `
-            -Version $version `
-            -Name "sample-$env:TEMPLATE" `
-            -Destination $dest
-          if ($LASTEXITCODE -ne 0) { throw "bootstrap.ps1 failed: $LASTEXITCODE" }
-
-          New-Item -ItemType Directory -Force -Path (Join-Path $dest 'vendor') | Out-Null
-          Copy-Item -Path (Join-Path $env:PROJECT_ROOT 'vendor\*') `
-            -Destination (Join-Path $dest 'vendor') -Recurse -Force
-
-          "DEST=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Write the jcardengine profile
-        shell: pwsh
-        run: |
-          $profile = @'
-          schema: cinpo.profile.v1
-          name: jcardengine
-          runtime: jcardengine
-          secureChannel:
-            protocol: scp03
-            isdAid: A000000151000000
-            keyVersionNumber: 16
-            keyIdentifier: 0
-            securityLevel: 1
-            encKey: "1111111111111111111111111111111111111111111111111111111111111111"
-            macKey: "2222222222222222222222222222222222222222222222222222222222222222"
-            dekKey: "3333333333333333333333333333333333333333333333333333333333333333"
-          '@
-          Set-Content -LiteralPath (Join-Path $env:DEST 'profile\jcardengine.yaml') -Value $profile -Encoding utf8
-
-      - name: Run with the jcardengine profile
-        shell: pwsh
-        run: |
-          Push-Location $env:DEST
-          try {
-            if ($env:TEMPLATE -eq 'probe') {
-              $appArgs = '--debug --profile=jcardengine --task=probe'
-            } else {
-              $appArgs = '--debug --profile=jcardengine --test'
-            }
-            $output = & .\gradlew.bat cinpoRun "--args=$appArgs" --console=plain 2>&1
-            $code = $LASTEXITCODE
-            $output | ForEach-Object { Write-Host $_ }
-            if ($code -ne 0) { throw "cinpoRun failed: $code" }
-            if ($env:TEMPLATE -eq 'probe') {
-              if (-not ($output | Select-String -Pattern 'Card data unavailable: SW=6A88' -Quiet)) {
-                throw 'probe did not report SW=6A88'
-              }
-            }
-            Write-Host "RESULT jcardengine-$env:TEMPLATE exit=$code"
-          } finally {
-            Pop-Location
-          }
-
-  appliance:
-    name: Appliance JAR and CLI failures
-    runs-on: windows-2025
-    timeout-minutes: 45
-    env:
-      TEMPLATE: probe
-    steps:
-      - name: Check out CINPO at the release ref
-        uses: actions/checkout@v6
-        with:
-          repository: AokiApp/cinpo
-          ref: ${{ env.CINPO_REF }}
-          path: cinpo
-          persist-credentials: false
-
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Download and extract the vendor archives
-        shell: pwsh
-        run: |
-          [IO.Directory]::CreateDirectory($env:PROJECT_ROOT) | Out-Null
-          $vendor = Join-Path $env:PROJECT_ROOT 'vendor'
-          [IO.Directory]::CreateDirectory($vendor) | Out-Null
-          $zip = Join-Path $env:PROJECT_ROOT 'vendor.zip'
-          curl.exe -fsSL -o $zip "https://raw.githubusercontent.com/AokiApp/cinpo/$env:CINPO_REF/vendor.zip"
-          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip download failed' }
-          $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
-          if (-not $sevenZip) { $sevenZip = 'C:\Program Files\7-Zip\7z.exe' }
-          & $sevenZip x -y "-p$env:VENDOR_PASSWORD" $zip "-o$vendor"
-          if ($LASTEXITCODE -ne 0) { throw 'vendor.zip extraction failed' }
-
-      - name: Bootstrap the probe template and stage vendor
-        shell: pwsh
-        run: |
-          $dest = Join-Path $env:PROJECT_ROOT 'appliance'
-          $version = $env:CINPO_REF -replace '^v', ''
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-            -File .\cinpo\scripts\bootstrap.ps1 `
-            -Template $env:TEMPLATE `
-            -Version $version `
-            -Name "sample-$env:TEMPLATE" `
-            -Destination $dest
-          if ($LASTEXITCODE -ne 0) { throw "bootstrap.ps1 failed: $LASTEXITCODE" }
-
-          New-Item -ItemType Directory -Force -Path (Join-Path $dest 'vendor') | Out-Null
-          Copy-Item -Path (Join-Path $env:PROJECT_ROOT 'vendor\*') `
-            -Destination (Join-Path $dest 'vendor') -Recurse -Force
-
-          "DEST=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Build the appliance JAR and run it
-        shell: pwsh
-        run: |
-          Push-Location $env:DEST
+          Push-Location (Join-Path $env:PROJECT_ROOT 'probe')
           try {
             & .\gradlew.bat cinpoJar --console=plain
             if ($LASTEXITCODE -ne 0) { throw "cinpoJar failed: $LASTEXITCODE" }
 
-            $jar = Join-Path $env:DEST 'build\libs\cinpo-appliance.jar'
+            $jar = Join-Path $env:PROJECT_ROOT 'probe\build\libs\cinpo-appliance.jar'
             $output = & java -jar $jar write --profile jcdksim --task=probe 2>&1
             $code = $LASTEXITCODE
             $output | ForEach-Object { Write-Host $_ }
@@ -332,3 +189,54 @@ jobs:
           # The last negative case leaves $LASTEXITCODE at 1 on purpose. Exit
           # explicitly so the step reports the checks, not that exit code.
           exit 0
+
+      - name: Write the jcardengine profiles
+        shell: pwsh
+        run: |
+          $profile = @'
+          schema: cinpo.profile.v1
+          name: jcardengine
+          runtime: jcardengine
+          secureChannel:
+            protocol: scp03
+            isdAid: A000000151000000
+            keyVersionNumber: 16
+            keyIdentifier: 0
+            securityLevel: 1
+            encKey: "1111111111111111111111111111111111111111111111111111111111111111"
+            macKey: "2222222222222222222222222222222222222222222222222222222222222222"
+            dekKey: "3333333333333333333333333333333333333333333333333333333333333333"
+          '@
+          foreach ($template in @('basic', 'probe')) {
+            Set-Content -LiteralPath (Join-Path $env:PROJECT_ROOT "$template\profile\jcardengine.yaml") `
+              -Value $profile -Encoding utf8
+          }
+
+      - name: JCardEngine / basic
+        shell: pwsh
+        run: |
+          Push-Location (Join-Path $env:PROJECT_ROOT 'basic')
+          try {
+            & .\gradlew.bat cinpoRun --args='--debug --profile=jcardengine --test' --console=plain
+            if ($LASTEXITCODE -ne 0) { throw "cinpoRun failed: $LASTEXITCODE" }
+            Write-Host 'RESULT jcardengine-basic exit=0'
+          } finally {
+            Pop-Location
+          }
+
+      - name: JCardEngine / probe
+        shell: pwsh
+        run: |
+          Push-Location (Join-Path $env:PROJECT_ROOT 'probe')
+          try {
+            $output = & .\gradlew.bat cinpoRun --args='--debug --profile=jcardengine --task=probe' --console=plain 2>&1
+            $code = $LASTEXITCODE
+            $output | ForEach-Object { Write-Host $_ }
+            if ($code -ne 0) { throw "cinpoRun failed: $code" }
+            if (-not ($output | Select-String -Pattern 'Card data unavailable: SW=6A88' -Quiet)) {
+              throw 'probe did not report SW=6A88'
+            }
+            Write-Host 'RESULT jcardengine-probe exit=0'
+          } finally {
+            Pop-Location
+          }
