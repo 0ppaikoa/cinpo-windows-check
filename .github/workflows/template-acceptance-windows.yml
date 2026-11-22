@@ -109,31 +109,31 @@ jobs:
             }
           }
 
-      - name: jcdksim / basic
+      - name: jcdksim / basic (cinpoRun --test)
         shell: pwsh
         run: |
           Push-Location (Join-Path $env:PROJECT_ROOT 'basic')
           try {
-            & .\gradlew.bat test --console=plain
+            & .\gradlew.bat cinpoRun --args='--test' --console=plain
             if ($LASTEXITCODE -ne 0) { throw "gradlew failed: $LASTEXITCODE" }
             Write-Host 'RESULT jcdksim-basic exit=0'
           } finally {
             Pop-Location
           }
 
-      - name: jcdksim / authenticated
+      - name: jcdksim / authenticated (cinpoRun --test)
         shell: pwsh
         run: |
           Push-Location (Join-Path $env:PROJECT_ROOT 'authenticated')
           try {
-            & .\gradlew.bat test --console=plain
+            & .\gradlew.bat cinpoRun --args='--test' --console=plain
             if ($LASTEXITCODE -ne 0) { throw "gradlew failed: $LASTEXITCODE" }
             Write-Host 'RESULT jcdksim-authenticated exit=0'
           } finally {
             Pop-Location
           }
 
-      - name: jcdksim / probe
+      - name: jcdksim / probe (gradlew build)
         shell: pwsh
         run: |
           Push-Location (Join-Path $env:PROJECT_ROOT 'probe')
@@ -150,7 +150,7 @@ jobs:
             Pop-Location
           }
 
-      - name: Appliance JAR and CLI failures
+      - name: Appliance JAR and CLI failures (cinpoJar, java -jar)
         shell: pwsh
         run: |
           Push-Location (Join-Path $env:PROJECT_ROOT 'probe')
@@ -212,7 +212,7 @@ jobs:
               -Value $profile -Encoding utf8
           }
 
-      - name: JCardEngine / basic
+      - name: JCardEngine / basic (cinpoRun --test)
         shell: pwsh
         run: |
           Push-Location (Join-Path $env:PROJECT_ROOT 'basic')
@@ -224,7 +224,7 @@ jobs:
             Pop-Location
           }
 
-      - name: JCardEngine / probe
+      - name: JCardEngine / probe (cinpoRun --task=probe)
         shell: pwsh
         run: |
           Push-Location (Join-Path $env:PROJECT_ROOT 'probe')
